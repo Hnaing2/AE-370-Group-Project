@@ -27,12 +27,25 @@ class BEStepResult:
 
 def step_fe(f: RHS, t: float, u: np.ndarray, dt: float, f0: Optional[np.ndarray] = None) -> tuple[np.ndarray, int]:
     """Forward Euler. Reuse f0 = f(t, u) if supplied. Returns (u_next, rhs_calls)."""
-    raise NotImplementedError
+    calls = 0
+    if f0 is None:
+        f0 = f(t, u)
+        calls += 1
+    return u + dt * f0, calls
 
 
 def step_rk4(f: RHS, t: float, u: np.ndarray, dt: float, f0: Optional[np.ndarray] = None) -> tuple[np.ndarray, int]:
     """Classical RK4. Reuse f0 = f(t, u) as k1 if supplied. Returns (u_next, rhs_calls)."""
-    raise NotImplementedError
+    calls = 3
+    k1 = f0
+    if k1 is None:
+        k1 = f(t, u)
+        calls += 1
+    half = 0.5 * dt
+    k2 = f(t + half, u + half * k1)
+    k3 = f(t + half, u + half * k2)
+    k4 = f(t + dt, u + dt * k3)
+    return u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4), calls
 
 
 def step_ab3(u: np.ndarray, f_hist: Sequence[np.ndarray], dt: float) -> np.ndarray:
