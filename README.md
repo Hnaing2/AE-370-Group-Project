@@ -39,3 +39,16 @@ merged into `main` through a pull request:
 | `report`     | All (write-up)               | LaTeX report, contributions, AI acknowledgment               |
 
 Pull `main` into your branch often so the pieces stay compatible.
+
+## Implementation notes
+
+Choices made while coding that the spec leaves open; cite these in the report where relevant.
+
+- **Pressure extrema use stored states only** (`compute_metrics`, M4). Min/max powered Pu is taken
+  over the accepted step states, with no refinement between steps. Missing the true peak between
+  steps costs about 10–200 Pa at dt = 0.5–2.5 ms, well under the 8 kPa (0.1% of Pset) tolerance.
+  Revisit if a much coarser dt is ever selected.
+- **`Pu_overshoot` keeps its sign** (`compute_metrics`, M4). It is max Pu − Pset after the first
+  time Pu reaches Pset. Negative means Pu never climbed back above Pset: both reference runs give
+  negative values (about −6 kPa regulated, −140 Pa fixed orifice). The 3.5% initial overpressure
+  is reported separately as `Pu_initial_overpressure`.
