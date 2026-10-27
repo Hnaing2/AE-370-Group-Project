@@ -1,8 +1,16 @@
 """M4 gate: reproduce the Section 3.8 reference outputs with RK4 at dt = 0.5 ms (model.md Section 3.8)."""
 
+import functools
+
 import pytest
 
+from src.parameters import FIXED_ORIFICE_CASE, REFERENCE_CASE, build_params
+from src.simulation import compute_metrics, simulate
+
 REL_TOL = 1e-3  # ~0.1%
+DT = 5.0e-4
+
+CASES = {"regulated": REFERENCE_CASE, "fixed_orifice": FIXED_ORIFICE_CASE}
 
 # Section 3.8 reference outputs (SI units).
 EXPECTED = {
@@ -36,15 +44,37 @@ EXPECTED = {
     },
 }
 # Values printed with 3 significant figures (apogee_t, apogee_x, a_cut, g, Mach) are compared at
-# their printed precision rather than 0.1%.
+# their printed precision rather than 0.1%: half a unit in the last printed digit.
+PRINTED_HALF_UNIT = {
+    "apogee_t": 0.05,
+    "apogee_x": 50.0,
+    "a_cut": 5e-4,
+    "peak_specific_force_g": 5e-3,
+    "peak_mach": 5e-3,
+}
+
+
+@functools.lru_cache(maxsize=None)
+def reference_run(scenario):
+    result = simulate("rk4", build_params(CASES[scenario]), {"dt": DT})
+    return result, compute_metrics(result)
 
 
 @pytest.mark.parametrize("scenario", list(EXPECTED))
 def test_reference_outputs(scenario):
-    pytest.skip("M4: not implemented")
+    result, metrics = reference_run(scenario)
+    assert result.status == "completed"
+    for key, expected in EXPECTED[scenario].items():
+        if key in PRINTED_HALF_UNIT:
+            assert metrics[key] == pytest.approx(expected, abs=PRINTED_HALF_UNIT[key]), key
+        else:
+            assert metrics[key] == pytest.approx(expected, rel=REL_TOL), key
+    # Section 3.8 reports Pu at cutoff as the minimum powered Pu.
+    assert metrics["Pu_min"] == pytest.approx(metrics["Pu_cut"], rel=1e-12)
 
 
 @pytest.mark.parametrize("scenario", list(EXPECTED))
 def test_helium_drift_rk4(scenario):
     """Relative helium drift ~1e-14."""
-    pytest.skip("M4: not implemented")
+    _, metrics = reference_run(scenario)
+    assert metrics["helium_drift"] < 1e-13

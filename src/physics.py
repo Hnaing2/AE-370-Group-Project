@@ -163,9 +163,50 @@ def analytic_jacobian_choked(t: float, u: np.ndarray, params: Any) -> np.ndarray
     raise NotImplementedError
 
 
-def standard_atmosphere_1976(h: float) -> tuple[float, float]:
-    """(density, temperature) from the piecewise 1976 US Standard Atmosphere, 0-50 km.
+# 1976 US Standard Atmosphere: layers by geopotential altitude (base m, base temperature K, lapse K/m).
+_US76_LAYERS = (
+    (0.0, 288.15, -0.0065),
+    (11000.0, 216.65, 0.0),
+    (20000.0, 216.65, 0.001),
+    (32000.0, 228.65, 0.0028),
+    (47000.0, 270.65, 0.0),
+    (51000.0, 270.65, -0.0028),
+    (71000.0, 214.65, -0.002),
+)
+_US76_TOP = 84852.0           # m geopotential, top of the last layer (~86 km geometric)
+_US76_R0 = 6356766.0          # m, Earth radius used for geopotential altitude
+_US76_G0 = 9.80665            # m/s^2
+_US76_P0 = 101325.0           # Pa
+R_AIR_1976 = 8314.32 / 28.9644  # J/(kg K), R* / M0
 
-    Post-processing only: Mach number and the nominal atmosphere sensitivity check (Section 3.7).
+
+def _us76_layer_pressure(Pb: float, Tb: float, lapse: float, dH: float) -> float:
+    if lapse == 0.0:
+        return Pb * math.exp(-_US76_G0 * dH / (R_AIR_1976 * Tb))
+    return Pb * (Tb / (Tb + lapse * dH)) ** (_US76_G0 / (R_AIR_1976 * lapse))
+
+
+def _us76_base_pressures() -> tuple[float, ...]:
+    P = [_US76_P0]
+    for (Hb, Tb, lapse), (Hn, _, _) in zip(_US76_LAYERS[:-1], _US76_LAYERS[1:]):
+        P.append(_us76_layer_pressure(P[-1], Tb, lapse, Hn - Hb))
+    return tuple(P)
+
+
+_US76_BASE_P = _us76_base_pressures()
+
+
+def standard_atmosphere_1976(h: float) -> tuple[float, float]:
+    """(density, temperature) from the piecewise 1976 US Standard Atmosphere at geometric altitude h.
+
+    Valid 0-86 km (the seven layers below 84.852 km geopotential). Post-processing only: Mach
+    number and the nominal atmosphere sensitivity check (Section 3.7).
     """
-    raise NotImplementedError
+    H = _US76_R0 * h / (_US76_R0 + h)  # geopotential altitude
+    if not 0.0 <= H <= _US76_TOP:
+        raise ValueError(f"altitude outside the 1976 Standard Atmosphere table: h = {h}")
+    i = max(k for k, layer in enumerate(_US76_LAYERS) if layer[0] <= H)
+    Hb, Tb, lapse = _US76_LAYERS[i]
+    T = Tb + lapse * (H - Hb)
+    P = _us76_layer_pressure(_US76_BASE_P[i], Tb, lapse, H - Hb)
+    return P / (R_AIR_1976 * T), T

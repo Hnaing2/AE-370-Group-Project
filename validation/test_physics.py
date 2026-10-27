@@ -14,6 +14,7 @@ from src.physics import (
     flow_function,
     jacobian,
     rhs,
+    standard_atmosphere_1976,
 )
 
 
@@ -213,3 +214,17 @@ def test_fd_jacobian_matches_rhs_increment(ref):
     du = 1e-5 * scales * rng.standard_normal(8)
     df = rhs(0.0, u + du, ref, "powered") - rhs(0.0, u, ref, "powered")
     assert np.allclose(J @ du, df, rtol=1e-3, atol=1e-12 * np.abs(rhs(0.0, u, ref, "powered")).max())
+
+
+@pytest.mark.parametrize("h, rho, T", [
+    (0.0, 1.2250, 288.150),
+    (20000.0, 8.8910e-2, 216.650),
+    (30000.0, 1.8410e-2, 226.509),
+    (40000.0, 3.9957e-3, 250.350),
+    (50000.0, 1.0269e-3, 270.650),
+])
+def test_standard_atmosphere_1976_table(h, rho, T):
+    """Published 1976 US Standard Atmosphere values at geometric altitude (used only for Mach)."""
+    rho_calc, T_calc = standard_atmosphere_1976(h)
+    assert rho_calc == pytest.approx(rho, rel=1e-4)
+    assert T_calc == pytest.approx(T, abs=1e-3)
