@@ -17,12 +17,20 @@ PHASES = ("powered", "coast")
 
 def critical_pressure_ratio(gamma_he: float) -> float:
     """r_* = (2/(gamma_he+1))^(gamma_he/(gamma_he-1)) (Section 5.4)."""
-    raise NotImplementedError
+    return (2.0 / (gamma_he + 1.0)) ** (gamma_he / (gamma_he - 1.0))
 
 
 def flow_function(r: float, gamma_he: float) -> float:
     """Phi(r) for the choked/subcritical orifice law, r = Pu/Ps (Section 5.4)."""
-    raise NotImplementedError
+    if r < 0.0:
+        raise ValueError(f"pressure ratio must be nonnegative, got {r}")
+    if r >= 1.0:
+        return 0.0  # check valve: no reverse flow
+    if r <= critical_pressure_ratio(gamma_he):
+        return 1.0
+    g = gamma_he
+    num = np.sqrt(2.0 / (g - 1.0) * (r ** (2.0 / g) - r ** ((g + 1.0) / g)))
+    return float(num / (2.0 / (g + 1.0)) ** ((g + 1.0) / (2.0 * (g - 1.0))))
 
 
 def derived_quantities(u: np.ndarray, params: Any, phase: str) -> dict[str, Any]:
