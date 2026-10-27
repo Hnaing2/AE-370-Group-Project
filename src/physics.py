@@ -6,7 +6,7 @@ Spec: docs/spec/model.md (Sections 5, 6); docs/spec/numerics.md (Sections 7.2, 9
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -125,21 +125,27 @@ def rhs(t: float, u: np.ndarray, params: Any, phase: str) -> np.ndarray:
     return du
 
 
-def _jacobian_scales(params: Any) -> np.ndarray:
-    """Characteristic magnitude of each state, the floor for FD perturbation sizes (Section 9.2)."""
+def state_scales(params: Any) -> np.ndarray:
+    """Characteristic magnitude of each state: the floor for FD perturbation sizes (Section 9.2)
+    and the BE variable/residual scaling S (Section 8.4)."""
     return np.array([params.h0, params.h0, params.V0, 1.0,
                      params.mp0, params.ms0, params.mu0, 1.0], dtype=np.float64)
 
 
-def jacobian(t: float, u: np.ndarray, params: Any, phase: str, rel_step: float = 1e-6) -> np.ndarray:
+def jacobian(t: float, u: np.ndarray, params: Any, phase: str, rel_step: float = 1e-6,
+             f: Optional[Callable[[float, np.ndarray], np.ndarray]] = None) -> np.ndarray:
     """J = d(rhs)/du by scaled central finite differences, shape (8, 8) (Section 9.2).
 
     Each perturbation is rel_step * max(|u_j|, scale_j). Where a central perturbation of the valve
     opening would leave [0, 1], a second-order one-sided difference is used instead, so the
     Jacobian is defined on the bounds (e.g. a0 = 0) without evaluating outside the physical domain.
+    f, if given, is the phase closure f(t, u) = rhs(t, u, params, phase) to difference; the BE
+    driver passes a counting closure so every finite-difference RHS call is counted.
     """
+    if f is None:
+        f = lambda t, v: rhs(t, v, params, phase)
     u = np.asarray(u, dtype=np.float64)
-    steps = rel_step * np.maximum(np.abs(u), _jacobian_scales(params))
+    steps = rel_step * np.maximum(np.abs(u), state_scales(params))
     J = np.empty((8, 8))
     for j in range(8):
         e = np.zeros(8)
@@ -151,9 +157,9 @@ def jacobian(t: float, u: np.ndarray, params: Any, phase: str, rel_step: float =
         else:
             sides = None
         if sides is None:
-            J[:, j] = (rhs(t, u + e, params, phase) - rhs(t, u - e, params, phase)) / (2.0 * steps[j])
+            J[:, j] = (f(t, u + e) - f(t, u - e)) / (2.0 * steps[j])
         else:
-            f0, f1, f2 = (rhs(t, u + s * e, params, phase) for s in sides)
+            f0, f1, f2 = (f(t, u + s * e) for s in sides)
             J[:, j] = (-3.0 * f0 + 4.0 * f1 - f2) / (2.0 * sides[1] * steps[j])
     return J
 

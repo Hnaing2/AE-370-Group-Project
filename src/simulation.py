@@ -13,15 +13,17 @@ from typing import Any, Callable, Mapping, Optional
 
 import numpy as np
 
-from .integrators import step_fe, step_rk4
+from .integrators import step_ab3, step_be, step_fe, step_rk4
 from .parameters import build_initial_state, validate
 from .physics import (
     IA, IH, IMP, IMS, IMU, IV, IX,
     R_AIR_1976,
     PhysicalModelInvalid,
     derived_quantities,
+    jacobian,
     rhs,
     standard_atmosphere_1976,
+    state_scales,
 )
 
 METHODS = ("fe", "rk4", "ab3", "be")
@@ -31,12 +33,11 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "method": "rk4",
     "dt": 5.0e-4,             # s; t_cut / dt must be an integer
     "be_residual_tol": 1e-10,
-    "be_solver_options": {},
+    "be_solver_options": {},  # Newton overrides of NEWTON_DEFAULTS, or {"method": <scipy root method>, ...}
     "t_end": None,            # None -> params.t_end
 }
 
 GAMMA_AIR = 1.4  # post-processing only, for Mach number
-_EXPLICIT_STEPS = {"fe": step_fe, "rk4": step_rk4}
 _DERIVED_KEYS = ("M", "Vu", "Pu", "Ps", "Ts", "r", "rho", "g", "D", "F_eng", "T_ax", "qp", "qr",
                  "a_cmd", "choked", "Pu_below_half_Pset")
 
@@ -61,14 +62,80 @@ class SimulationResult:
     options: Mapping[str, Any] = field(default_factory=dict)
 
 
+class _SolverFailed(Exception):
+    """A BE step was not accepted; the run ends with status solver_failed."""
+
+    def __init__(self, message: str, residual: float):
+        super().__init__(message)
+        self.residual = residual
+
+
+# advance(n, u, F_hist) -> (u_{n+1}, f(t_{n+1}, u_{n+1})), with F_hist the derivatives at this
+# segment's accepted states so far (F_hist[-1] = f(t_n, u)); adds its own RHS calls to the counters.
+Advance = Callable[[int, np.ndarray, list], tuple[np.ndarray, np.ndarray]]
+
+
+def _explicit_advance(method: str, f: Callable, dt: float, counters: dict[str, Any]) -> Advance:
+    """FE, RK4, or AB3, reusing the stored f(t_n, u_n) as f0 / k1 / f_n.
+
+    AB3 takes RK4 steps until this segment holds three derivatives, so it starts at t = 0 and
+    restarts at t_cut with two RK4 steps on the coast-side history only (Section 8.3).
+    """
+    def advance(n, u, F_hist):
+        if method == "fe":
+            u_next, calls = step_fe(f, n * dt, u, dt, F_hist[-1])
+        elif method == "rk4" or len(F_hist) < 3:
+            u_next, calls = step_rk4(f, n * dt, u, dt, F_hist[-1])
+        else:
+            u_next, calls = step_ab3(u, (F_hist[-1], F_hist[-2], F_hist[-3]), dt), 0
+        counters["rhs_calls"] += calls + 1
+        return u_next, f((n + 1) * dt, u_next)
+    return advance
+
+
+def _be_advance(f: Callable, params: Any, phase: str, dt: float, opts: Mapping[str, Any],
+                counters: dict[str, Any], be_stats: dict[str, float]) -> Advance:
+    """BE with the phase's finite-difference Jacobian and state scales (Section 8.4).
+
+    Every RHS call (residuals and finite differences) goes through one counting closure, so a failed
+    step is counted too. The derivative step_be evaluated at the accepted state is stored as F. An iterate that leaves the physical domain is a solver failure, not an invalid
+    accepted state; nothing is clipped.
+    """
+    def counted(t, u):
+        counters["rhs_calls"] += 1
+        return f(t, u)
+
+    jac = lambda t, u: jacobian(t, u, params, phase, f=counted)
+    scales = state_scales(params)
+
+    def advance(n, u, F_hist):
+        try:
+            res = step_be(counted, n * dt, u, dt, jac=jac, scales=scales,
+                          residual_tol=opts["be_residual_tol"], solver_options=opts["be_solver_options"])
+        except PhysicalModelInvalid as exc:
+            counters["be_failures"] += 1
+            raise _SolverFailed(f"nonlinear iterate left the physical domain: {exc}", math.nan) from exc
+        counters["jac_calls"] += res.n_jac
+        if res.n_iter is not None:
+            counters["nonlinear_iters"] = (counters["nonlinear_iters"] or 0) + res.n_iter
+        if not res.success:
+            counters["be_failures"] += 1
+            raise _SolverFailed(res.message, res.residual)
+        be_stats["max_residual"] = max(be_stats["max_residual"], res.residual)
+        return res.u, res.f
+    return advance
+
+
 def _integrate_segment(
-    step: Callable, f: Callable, phase: str, n0: int, u0: np.ndarray, dt: float, n_max: int,
+    advance: Advance, f: Callable, phase: str, n0: int, u0: np.ndarray, dt: float, n_max: int,
     stop_after_apogee: bool, counters: dict[str, Any],
 ) -> tuple[Segment, Optional[dict[str, Any]]]:
-    """Accept steps n0+1..n_max of one phase (fewer if stopping after apogee or on an invalid state).
+    """Accept steps n0+1..n_max of one phase (fewer if stopping after apogee, on an invalid state,
+    or on a rejected BE step).
 
-    F[k] = f(t_k, U[k]) is stored with every accepted state and reused as the next step's k1, so a
-    state and its derivative are appended together. Returns (segment, error or None).
+    F[k] = f(t_k, U[k]) is stored with every accepted state and reused by the next step, so a
+    state and its derivative are appended together. Returns (segment, error or None); the error
+    carries the run status it implies.
     """
     t_acc, U_acc, F_acc = [], [], []
     error = None
@@ -82,12 +149,14 @@ def _integrate_segment(
             F_acc.append(fu)
             if n >= n_max or (stop_after_apogee and len(F_acc) > 1 and F_acc[-2][IH] > 0.0 >= fu[IH]):
                 break
-            u, calls = step(f, n * dt, u, dt, fu)
-            counters["rhs_calls"] += calls + 1
+            u, fu = advance(n, u, F_acc)
             n += 1
-            fu = f(n * dt, u)
     except PhysicalModelInvalid as exc:
-        error = {"phase": phase, "t_last_accepted": t_acc[-1] if t_acc else None, "message": str(exc)}
+        error = {"status": "physical_model_invalid", "phase": phase,
+                 "t_last_accepted": t_acc[-1] if t_acc else None, "message": str(exc)}
+    except _SolverFailed as exc:
+        error = {"status": "solver_failed", "phase": phase, "t_last_accepted": t_acc[-1],
+                 "message": str(exc), "residual": exc.residual}
     seg = Segment(phase, np.array(t_acc), np.array(U_acc).reshape(-1, 8), np.array(F_acc).reshape(-1, 8))
     return seg, error
 
@@ -100,13 +169,12 @@ def simulate(method: str, params: Any, options: Mapping[str, Any]) -> Simulation
     """Integrate powered steps 1..N_cut, then coast until the step after apogee (or t_end).
 
     The cutoff state starts the coast segment; AB3 restarts there from two RK4 steps (Section 8.3).
-    Invalid options raise ValueError; a state leaving the physical domain ends the run with status
-    physical_model_invalid and keeps the states accepted so far.
+    Invalid options raise ValueError. A state leaving the physical domain ends the run with status
+    physical_model_invalid, and a rejected BE step with solver_failed; either keeps the states
+    accepted so far.
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
-    if method not in _EXPLICIT_STEPS:
-        raise NotImplementedError(f"{method} is not wired into the driver yet (M5)")
     opts = {**DEFAULT_OPTIONS, **options, "method": method}
     u0 = build_initial_state(params)
     n_cut = validate(params, u0, opts)["n_cut"]
@@ -116,21 +184,30 @@ def simulate(method: str, params: Any, options: Mapping[str, Any]) -> Simulation
     if n_end <= n_cut:
         raise ValueError(f"t_end = {t_end} must exceed t_cut = {params.t_cut}")
 
-    counters = {"rhs_calls": 0, "jac_calls": 0, "nonlinear_iters": 0, "ab3_restarts": 0,
-                "be_failures": 0, "wall_time": 0.0}
-    step = _EXPLICIT_STEPS[method]
+    # nonlinear_iters stays None for BE if the solver does not expose iterations (scipy hybr does not).
+    counters = {"rhs_calls": 0, "jac_calls": 0, "nonlinear_iters": None if method == "be" else 0,
+                "ab3_restarts": 0, "be_failures": 0, "wall_time": 0.0}
+    be_stats = {"max_residual": 0.0}
+
+    def make_advance(phase):
+        f = _phase_rhs(params, phase)
+        if method == "be":
+            return _be_advance(f, params, phase, dt, opts, counters, be_stats), f
+        return _explicit_advance(method, f, dt, counters), f
+
     start = time.perf_counter()
-    powered, error = _integrate_segment(step, _phase_rhs(params, "powered"), "powered",
-                                        0, u0, dt, n_cut, False, counters)
+    powered, error = _integrate_segment(*make_advance("powered"), "powered", 0, u0, dt, n_cut, False, counters)
     coast = None
     if error is None:
-        coast, error = _integrate_segment(step, _phase_rhs(params, "coast"), "coast",
-                                          n_cut, powered.U[-1], dt, n_end, True, counters)
+        if method == "ab3":
+            counters["ab3_restarts"] += 1  # the coast segment starts a fresh derivative history
+        coast, error = _integrate_segment(*make_advance("coast"), "coast", n_cut, powered.U[-1], dt, n_end,
+                                          True, counters)
     counters["wall_time"] = time.perf_counter() - start
 
     events: dict[str, Any] = {}
     if error is not None:
-        status = "physical_model_invalid"
+        status = error["status"]
     else:
         apogee = find_apogee(coast)
         status = "no_apogee" if apogee is None else "completed"
@@ -144,7 +221,9 @@ def simulate(method: str, params: Any, options: Mapping[str, Any]) -> Simulation
         "n_cut": n_cut,
         "t_cut": n_cut * dt,
         "helium_drift": float(np.max(np.abs(helium - helium0)) / helium0) if helium.size else math.nan,
-        "invalid": error,
+        "invalid": error if status == "physical_model_invalid" else None,
+        "solver_failure": error if status == "solver_failed" else None,
+        "be_max_residual": be_stats["max_residual"] if method == "be" else math.nan,  # over accepted steps
     }
     return SimulationResult(powered, coast, status, events, counters, diagnostics, params, opts)
 

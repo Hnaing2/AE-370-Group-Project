@@ -5,8 +5,9 @@ import functools
 import numpy as np
 import pytest
 
+from src.integrators import step_ab3, step_rk4
 from src.parameters import FIXED_ORIFICE_CASE, REFERENCE_CASE, build_params
-from src.physics import IA, IGAMMA, IH, IMP, IMS, IMU, IV, IX
+from src.physics import IA, IGAMMA, IH, IMP, IMS, IMU, IV, IX, rhs, state_scales
 from src.simulation import (
     Segment,
     compute_metrics,
@@ -70,8 +71,6 @@ def test_fixed_orifice_valve_constant():
 @pytest.mark.parametrize("method", ["fe", "rk4", "ab3", "be"])
 def test_helium_balance(method):
     """Relative drift of ms + mu <= 1e-10 (FE, RK4, AB3), <= 1e-8 (BE)."""
-    if method in ("ab3", "be"):
-        pytest.skip("M5: not implemented")
     result = run(method=method, t_end=T_POWERED_ONLY)
     assert result.status == "no_apogee"  # stopped at t_end, after cutoff
     assert result.diagnostics["helium_drift"] <= HELIUM_LIMIT[method]
@@ -91,11 +90,34 @@ def test_coupling_isolation():
 
 
 def test_rhs_call_counts():
-    """RK4 reuses each stored F as k1 (4 calls per step); FE takes 1. Each segment adds its final F."""
-    for method, per_step in (("rk4", 4), ("fe", 1)):
+    """RK4 reuses each stored F as k1 (4 calls per step); FE and AB3 take 1. Each segment adds its
+    initial F, and AB3 adds 3 more for each of its two RK4 steps per segment (start, restart)."""
+    for method, per_step, extra in (("rk4", 4, 0), ("fe", 1, 0), ("ab3", 1, 2 * 2 * 3)):
         result = run(method=method, t_end=T_POWERED_ONLY)
         n_steps = result.powered.t.size - 1 + result.coast.t.size - 1
-        assert result.counters["rhs_calls"] == per_step * n_steps + 2
+        assert result.counters["rhs_calls"] == per_step * n_steps + 2 + extra
+
+
+@pytest.mark.parametrize("method", ["fe", "rk4", "ab3", "be"])
+def test_every_rhs_call_counted(method, monkeypatch):
+    """counters["rhs_calls"] equals the true number of RHS evaluations, BE finite differences included."""
+    import src.physics
+    import src.simulation
+
+    calls = []
+    real_rhs = src.physics.rhs
+
+    def counting_rhs(*args, **kwargs):
+        calls.append(None)
+        return real_rhs(*args, **kwargs)
+
+    monkeypatch.setattr(src.physics, "rhs", counting_rhs)
+    monkeypatch.setattr(src.simulation, "rhs", counting_rhs)
+    result = simulate(method, build_params(REFERENCE_CASE), {"dt": 5e-3, "t_end": T_POWERED_ONLY})
+    assert result.status == "no_apogee"
+    assert result.counters["rhs_calls"] == len(calls)
+    if method == "be":
+        assert len(calls) > 16 * result.counters["jac_calls"]  # 16 per central-difference Jacobian
 
 
 def test_sample_at_time_never_crosses_cutoff():
@@ -154,8 +176,70 @@ def test_invalid_state_ends_run():
 
 
 def test_ab3_restarts_at_cutoff():
-    pytest.skip("M5: not implemented")
+    """Each segment starts with two RK4 steps on its own derivative history, then AB3 (Section 8.3):
+    the coast segment never uses powered-side derivatives."""
+    result = run(method="ab3", t_end=T_POWERED_ONLY)
+    assert result.status == "no_apogee"
+    assert result.counters["ab3_restarts"] == 1
+    dt = result.diagnostics["dt"]
+    for seg in (result.powered, result.coast):
+        f = lambda t, u: rhs(t, u, result.params, seg.phase)
+        t, U, F = seg.t, seg.U, seg.F
+        assert seg.t.size > 4
+        for k in range(t.size):
+            assert np.array_equal(F[k], f(t[k], U[k]))
+        for k in (0, 1):
+            assert np.array_equal(U[k + 1], step_rk4(f, t[k], U[k], dt, F[k])[0])
+        for k in range(2, t.size - 1):
+            assert np.array_equal(U[k + 1], step_ab3(U[k], (F[k], F[k - 1], F[k - 2]), dt))
+    # The coast-side derivative at t_cut differs from the powered side; restarting matters.
+    assert not np.array_equal(result.coast.F[0], result.powered.F[-1])
 
 
 def test_be_reports_residual_and_counts():
-    pytest.skip("M5: not implemented")
+    """Every accepted BE step satisfies its scaled residual, recomputed here from the stored U and F."""
+    result = run(method="be", t_end=T_POWERED_ONLY)
+    assert result.status == "no_apogee"
+    counters, diag = result.counters, result.diagnostics
+    n_steps = result.powered.t.size - 1 + result.coast.t.size - 1
+    assert counters["be_failures"] == 0 and diag["solver_failure"] is None
+    assert counters["jac_calls"] >= n_steps                 # at least one Newton matrix per step
+    assert counters["nonlinear_iters"] >= 2 * n_steps       # a correction plus the round-off check
+    assert 0.0 <= diag["be_max_residual"] <= 1e-10
+    S = state_scales(result.params)
+    dt = diag["dt"]
+    for seg in (result.powered, result.coast):
+        G = (seg.U[1:] - seg.U[:-1] - dt * seg.F[1:]) / S
+        assert np.max(np.abs(G)) <= 1e-10
+        for k in (0, seg.t.size // 2, seg.t.size - 1):
+            assert np.array_equal(seg.F[k], rhs(seg.t[k], seg.U[k], result.params, seg.phase))
+
+
+def test_be_tightened_solve_changes_nothing():
+    """Section 8.4 step 5: tighter algebraic settings leave the outputs unchanged far below tolerance."""
+    nominal = run(method="be", t_end=T_POWERED_ONLY)
+    params = nominal.params
+    tight = simulate("be", params, {"dt": 2.5e-3, "t_end": T_POWERED_ONLY, "be_residual_tol": 1e-13,
+                                    "be_solver_options": {"step_tol": 1e-14}})
+    assert tight.status == "no_apogee"
+    assert tight.diagnostics["be_max_residual"] <= 1e-13
+    Pu_change = np.max(np.abs(derived_history(tight)["Pu"] - derived_history(nominal)["Pu"]))
+    assert Pu_change <= 1e-6 * 8e3  # 8 kPa pressure tolerance (Section 11.1)
+    assert np.max(np.abs(tight.coast.U[-1, :IMP] - nominal.coast.U[-1, :IMP])
+                  / state_scales(params)[:IMP]) <= 1e-10
+
+
+def test_be_rejected_step_ends_run():
+    """A step without convergence ends the run as solver_failed; accepted states are kept."""
+    params = build_params(REFERENCE_CASE)
+    result = simulate("be", params, {"dt": 2.5e-3, "t_end": T_POWERED_ONLY,
+                                     "be_solver_options": {"max_iter": 1}})
+    assert result.status == "solver_failed"
+    assert result.coast is None and result.powered.t.size == 1
+    failure = result.diagnostics["solver_failure"]
+    assert failure["phase"] == "powered" and failure["t_last_accepted"] == 0.0
+    assert "no convergence" in failure["message"] and failure["residual"] > 0.0
+    assert result.diagnostics["invalid"] is None
+    assert result.counters["be_failures"] == 1
+    metrics = compute_metrics(result)
+    assert metrics["status"] == "solver_failed" and np.isnan(metrics["apogee_h"])

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
 import numpy as np
+from scipy import optimize
 
 RHS = Callable[[float, np.ndarray], np.ndarray]
 
@@ -17,12 +18,44 @@ RHS = Callable[[float, np.ndarray], np.ndarray]
 @dataclass
 class BEStepResult:
     u: np.ndarray            # accepted next state (only meaningful when success is True)
+    f: np.ndarray            # f(t + dt, u), the derivative at the returned state
     success: bool
     residual: float          # achieved max scaled residual
-    n_rhs: int               # every RHS call, including finite differences
-    n_jac: int
+    n_rhs: int               # every call to f, including finite-difference Jacobians when jac is None
+    n_jac: int               # Jacobian evaluations, supplied or finite-difference
     n_iter: Optional[int]    # nonlinear iterations, when the solver exposes them
     message: str
+
+
+# Default BE solve: Newton on the scaled residual (Section 8.4). It stops when the scaled correction
+# max|dw| <= step_tol; acceptance is then decided by the achieved residual alone. scipy's hybr is kept
+# as a cross-check (solver_options={"method": "hybr", ...}); it stops on its trust-region size, which
+# misreports "no progress" once the residual already sits at round-off (README notes).
+NEWTON_DEFAULTS = {"step_tol": 1e-12, "max_iter": 20}
+_FD_REL_STEP = 1.49e-8  # sqrt(machine epsilon), forward differences when no Jacobian is supplied
+
+
+def _newton(residual: Callable, residual_jac: Callable, w: np.ndarray, step_tol: float, max_iter: int):
+    """Newton iteration for G(w) = 0, with residual(w) -> (G, f) and residual_jac(w, G) -> dG/dw.
+
+    The Newton matrix is kept while the residual decreases and re-evaluated at the current iterate
+    when it does not. Returns (w, G, f, iterations, converged, message) at the last iterate.
+    """
+    G, fw = residual(w)
+    J = residual_jac(w, G)
+    for k in range(1, max_iter + 1):
+        try:
+            dw = np.linalg.solve(J, -G)
+        except np.linalg.LinAlgError as exc:
+            return w, G, fw, k - 1, False, f"singular Newton matrix ({exc})"
+        w = w + dw
+        G_new, fw = residual(w)
+        if np.max(np.abs(dw)) <= step_tol:
+            return w, G_new, fw, k, True, "converged"
+        if not np.max(np.abs(G_new)) < np.max(np.abs(G)):
+            J = residual_jac(w, G_new)
+        G = G_new
+    return w, G, fw, max_iter, False, f"no convergence in {max_iter} Newton iterations"
 
 
 def step_fe(f: RHS, t: float, u: np.ndarray, dt: float, f0: Optional[np.ndarray] = None) -> tuple[np.ndarray, int]:
@@ -49,8 +82,12 @@ def step_rk4(f: RHS, t: float, u: np.ndarray, dt: float, f0: Optional[np.ndarray
 
 
 def step_ab3(u: np.ndarray, f_hist: Sequence[np.ndarray], dt: float) -> np.ndarray:
-    """AB3 with f_hist = (f_n, f_{n-1}, f_{n-2}), equally spaced; history is managed by the driver."""
-    raise NotImplementedError
+    """AB3 with f_hist = (f_n, f_{n-1}, f_{n-2}), equally spaced; history is managed by the driver.
+
+    No RHS calls: the driver stores f at every accepted state and starts (and restarts) with RK4.
+    """
+    f_n, f_n1, f_n2 = f_hist
+    return u + (dt / 12.0) * (23.0 * f_n - 16.0 * f_n1 + 5.0 * f_n2)
 
 
 def step_be(
@@ -63,11 +100,66 @@ def step_be(
     residual_tol: float = 1e-10,
     solver_options: Optional[dict] = None,
 ) -> BEStepResult:
-    """Backward Euler: solve the scaled residual G(z) = z - u - dt f(t+dt, z) with scipy.optimize.root.
+    """Backward Euler: solve the scaled residual G(z) = z - u - dt f(t+dt, z) for z = u_{n+1}.
 
-    Accept only on solver success and achieved scaled residual <= residual_tol (Section 8.4).
+    With z = S w the solve is in w: G_w = w - w_n - dt S^-1 f(t+dt, S w), Jacobian I - dt S^-1 J S,
+    where jac(t, z) = df/dz (forward differences of G_w if None) and S = scales (default ones). The
+    iteration starts from the current state and never clips an iterate. Accept only on solver
+    convergence and achieved scaled residual max|G_w| <= residual_tol (Section 8.4); the residual and
+    the returned f are from f evaluated at the returned state itself.
+
+    solver_options: Newton settings overriding NEWTON_DEFAULTS, or {"method": <scipy.optimize.root
+    method>, ...} with the remaining keys passed to scipy.optimize.root. Exceptions raised by f or
+    jac propagate.
     """
-    raise NotImplementedError
+    shape = np.shape(u)
+    u_n = np.atleast_1d(np.asarray(u, dtype=np.float64))
+    S = np.ones_like(u_n) if scales is None else np.broadcast_to(np.asarray(scales, dtype=np.float64), u_n.shape)
+    if not np.all(S > 0.0):
+        raise ValueError(f"scales must be positive, got {scales}")
+    t_new = t + dt
+    w_n = u_n / S
+    n_rhs = n_jac = 0
+
+    def residual(w):
+        nonlocal n_rhs
+        n_rhs += 1
+        fw = np.atleast_1d(f(t_new, (S * w).reshape(shape)))
+        return w - w_n - dt * fw / S, fw
+
+    def residual_jac(w, G):
+        nonlocal n_jac
+        n_jac += 1
+        if jac is None:
+            h = _FD_REL_STEP * np.maximum(np.abs(w), 1.0)
+            return np.column_stack([(residual(w + h[j] * np.eye(w.size)[j])[0] - G) / h[j]
+                                    for j in range(w.size)])
+        J = np.atleast_2d(jac(t_new, (S * w).reshape(shape)))
+        return np.eye(w.size) - dt * J * S[np.newaxis, :] / S[:, np.newaxis]
+
+    settings = dict(solver_options or {})
+    method = settings.pop("method", "newton")
+    if method == "newton":
+        w, G, f_new, n_iter, converged, why = _newton(residual, residual_jac, w_n.copy(),
+                                                      **{**NEWTON_DEFAULTS, **settings})
+    else:
+        sol = optimize.root(lambda w: residual(w)[0], w_n.copy(), method=method,
+                            jac=None if jac is None else (lambda w: residual_jac(w, None)), **settings)
+        w = sol.x
+        G, f_new = residual(w)
+        n_iter, converged, why = getattr(sol, "nit", None), bool(sol.success), str(sol.message)
+    achieved = float(np.max(np.abs(G)))
+    success = converged and achieved <= residual_tol
+    if success:
+        message = "converged"
+    elif converged:
+        message = f"solver converged but scaled residual {achieved:.3e} > {residual_tol:.1e}"
+    else:
+        message = f"solver failed: {why}"
+    return BEStepResult(
+        u=(S * w).reshape(shape), f=f_new.reshape(shape), success=success, residual=achieved,
+        n_rhs=n_rhs, n_jac=n_jac, n_iter=n_iter, message=message,
+    )
 
 
 def amplification_factor(method: str, z: complex) -> complex:
