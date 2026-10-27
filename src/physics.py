@@ -5,6 +5,7 @@ Spec: docs/spec/model.md (Sections 5, 6); docs/spec/numerics.md (Sections 7.2, 9
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,11 @@ import numpy as np
 IX, IH, IV, IGAMMA, IMP, IMS, IMU, IA = range(8)
 STATE_NAMES = ("x", "h", "V", "gamma", "mp", "ms", "mu", "a")
 PHASES = ("powered", "coast")
+A_BOUND_TOL = 1e-12  # documented roundoff allowance at the valve-opening bounds (Section 5.2)
+
+
+class PhysicalModelInvalid(ValueError):
+    """A state left the physical domain; the driver marks the run physical_model_invalid (Section 8.5)."""
 
 
 def critical_pressure_ratio(gamma_he: float) -> float:
@@ -39,17 +45,117 @@ def derived_quantities(u: np.ndarray, params: Any, phase: str) -> dict[str, Any]
     Engine force, qp, and qr are zero in coast (Section 6.2). Raise on invalid geometry, gas
     state, masses, or V <= 0 rather than patching the state (Section 5.2).
     """
-    raise NotImplementedError
+    if phase not in PHASES:
+        raise ValueError(f"phase must be one of {PHASES}, got {phase!r}")
+    if len(u) != 8:
+        raise ValueError(f"state must have 8 entries, got {len(u)}")
+    x, h, V, gamma, mp, ms, mu, a = (float(v) for v in u)
+    if not all(math.isfinite(v) for v in (x, h, V, gamma, mp, ms, mu, a)):
+        raise PhysicalModelInvalid(f"nonfinite state: {u}")
+    if V <= 0.0:
+        raise PhysicalModelInvalid(f"speed must be positive, got V = {V}")
+    if mp <= 0.0 or ms <= 0.0 or mu <= 0.0:
+        raise PhysicalModelInvalid(f"masses must be positive, got mp = {mp}, ms = {ms}, mu = {mu}")
+    if not -A_BOUND_TOL <= a <= 1.0 + A_BOUND_TOL:
+        raise PhysicalModelInvalid(f"valve opening outside [0, 1]: a = {a}")
+    Vu = params.Vtank - mp / params.rho_p
+    if Vu <= 0.0:
+        raise PhysicalModelInvalid(f"ullage volume must be positive, got Vu = {Vu}")
+    M = params.m_dry + mp + ms + mu
+    if M <= 0.0:
+        raise PhysicalModelInvalid(f"vehicle mass must be positive, got M = {M}")
+    if params.R_E + h <= 0.0:
+        raise PhysicalModelInvalid(f"altitude below Earth's center: h = {h}")
+
+    # Thermodynamics (Section 5.2): isothermal ullage, isentropic supply.
+    gam = params.gamma_he
+    Pu = mu * params.R_he * params.Tu / Vu
+    ms_ratio = ms / params.ms0
+    Ps = params.Ps0 * ms_ratio ** gam
+    Ts = params.Ts0 * ms_ratio ** (gam - 1.0)
+    r = Pu / Ps
+
+    # Environment and drag.
+    rho = params.rho0 * math.exp(-h / params.H)
+    g = params.g0 * (params.R_E / (params.R_E + h)) ** 2
+    D = 0.5 * rho * V * V * params.Cd * params.A_ref
+
+    powered = phase == "powered"
+    regulated = params.scenario == "regulated"
+    if powered:
+        F_eng = params.K_F * Pu                           # Section 5.1
+        T_ax = F_eng * math.cos(params.delta)
+        qp = F_eng / (params.Isp * params.g0)
+        qr = a * params.C_reg * Ps / math.sqrt(Ts) * flow_function(r, gam)  # Section 5.4
+    else:
+        F_eng = T_ax = qp = qr = 0.0                      # Section 6.2
+    if powered and regulated:
+        a_cmd = min(max(params.K_p * (params.Pset - Pu), 0.0), 1.0)  # Section 5.3
+    else:
+        a_cmd = a  # valve held: fixed orifice, or frozen at its cutoff value in coast
+
+    return {
+        "M": M, "Vu": Vu, "Pu": Pu, "Ps": Ps, "Ts": Ts, "r": r,
+        "rho": rho, "g": g, "D": D,
+        "F_eng": F_eng, "T_ax": T_ax, "qp": qp, "qr": qr, "a_cmd": a_cmd,
+        "choked": r <= params.r_star,
+        "Pu_below_half_Pset": powered and Pu < 0.5 * params.Pset,  # assumed engine-validity flag
+    }
 
 
 def rhs(t: float, u: np.ndarray, params: Any, phase: str) -> np.ndarray:
     """du/dt, shape (8,); pure function of its arguments (Sections 6.1, 6.2, 7.2)."""
-    raise NotImplementedError
+    q = derived_quantities(u, params, phase)
+    V, gamma, a = float(u[IV]), float(u[IGAMMA]), float(u[IA])
+    sin_g, cos_g = math.sin(gamma), math.cos(gamma)
+
+    du = np.zeros(8)
+    du[IX] = V * cos_g
+    du[IH] = V * sin_g
+    du[IV] = (q["T_ax"] - q["D"]) / q["M"] - q["g"] * sin_g
+    du[IGAMMA] = -q["g"] * cos_g / V
+    du[IMP] = -q["qp"]
+    du[IMS] = -q["qr"]
+    du[IMU] = q["qr"]
+    du[IA] = (q["a_cmd"] - a) / params.tau_v
+    if params.scenario == "fixed_orifice":
+        du[IA] = 0.0
+    if phase == "coast":
+        du[IMP:] = 0.0  # freeze mp, ms, mu, a
+    return du
+
+
+def _jacobian_scales(params: Any) -> np.ndarray:
+    """Characteristic magnitude of each state, the floor for FD perturbation sizes (Section 9.2)."""
+    return np.array([params.h0, params.h0, params.V0, 1.0,
+                     params.mp0, params.ms0, params.mu0, 1.0], dtype=np.float64)
 
 
 def jacobian(t: float, u: np.ndarray, params: Any, phase: str, rel_step: float = 1e-6) -> np.ndarray:
-    """J = d(rhs)/du by scaled central finite differences, shape (8, 8) (Section 9.2)."""
-    raise NotImplementedError
+    """J = d(rhs)/du by scaled central finite differences, shape (8, 8) (Section 9.2).
+
+    Each perturbation is rel_step * max(|u_j|, scale_j). Where a central perturbation of the valve
+    opening would leave [0, 1], a second-order one-sided difference is used instead, so the
+    Jacobian is defined on the bounds (e.g. a0 = 0) without evaluating outside the physical domain.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    steps = rel_step * np.maximum(np.abs(u), _jacobian_scales(params))
+    J = np.empty((8, 8))
+    for j in range(8):
+        e = np.zeros(8)
+        e[j] = steps[j]
+        if j == IA and u[j] - steps[j] < -A_BOUND_TOL:
+            sides = (0.0, 1.0, 2.0)    # forward
+        elif j == IA and u[j] + steps[j] > 1.0 + A_BOUND_TOL:
+            sides = (0.0, -1.0, -2.0)  # backward
+        else:
+            sides = None
+        if sides is None:
+            J[:, j] = (rhs(t, u + e, params, phase) - rhs(t, u - e, params, phase)) / (2.0 * steps[j])
+        else:
+            f0, f1, f2 = (rhs(t, u + s * e, params, phase) for s in sides)
+            J[:, j] = (-3.0 * f0 + 4.0 * f1 - f2) / (2.0 * sides[1] * steps[j])
+    return J
 
 
 def analytic_jacobian_choked(t: float, u: np.ndarray, params: Any) -> np.ndarray:

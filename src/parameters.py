@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .physics import critical_pressure_ratio, flow_function
+from .physics import A_BOUND_TOL, critical_pressure_ratio, flow_function
 
 # Section 3.6 baseline (Revision 4, flattened). Never edit REFERENCE_CASE.
 _BASELINE_INPUTS: dict[str, Any] = {
@@ -149,7 +149,6 @@ class Params:
 
 SCENARIOS = ("regulated", "fixed_orifice")
 SUPPLY_MODES = ("sized", "specified_mass")
-A_BOUND_TOL = 1e-12  # documented roundoff allowance at the valve-opening bounds (Section 5.2)
 
 UNITS: Mapping[str, str] = MappingProxyType({
     "h0": "m", "V0": "m/s", "gamma0": "rad", "x0": "m", "t_cut": "s", "m_dry": "kg", "mp0": "kg",
