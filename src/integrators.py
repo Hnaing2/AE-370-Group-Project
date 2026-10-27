@@ -162,16 +162,38 @@ def step_be(
     )
 
 
+_UNIT_ROOT_TOL = 1e-12  # |q| within this of 1 counts as a unit-modulus root; roots closer than this coincide
+
+
 def amplification_factor(method: str, z: complex) -> complex:
     """R(z) for "fe", "rk4", "be" (Section 9.4)."""
-    raise NotImplementedError
+    if method == "fe":
+        return 1.0 + z
+    if method == "rk4":
+        return 1.0 + z * (1.0 + z / 2.0 * (1.0 + z / 3.0 * (1.0 + z / 4.0)))
+    if method == "be":
+        return 1.0 / (1.0 - z)
+    raise ValueError(f"amplification factor defined for 'fe', 'rk4', 'be', got {method!r}")
 
 
 def ab3_characteristic_roots(z: complex) -> np.ndarray:
     """Roots of q^3 - (1 + 23z/12) q^2 + (16z/12) q - 5z/12 = 0 (Section 9.4)."""
-    raise NotImplementedError
+    return np.roots([1.0, -1.0 - 23.0 * z / 12.0, 16.0 * z / 12.0, -5.0 * z / 12.0])
 
 
 def is_absolutely_stable(method: str, z: complex, margin: float = 0.0) -> bool:
-    """|R(z)| <= 1 - margin; for AB3 all roots inside the unit disk, unit-modulus roots simple."""
-    raise NotImplementedError
+    """|R(z)| <= 1 - margin; for AB3 all roots inside the unit disk, unit-modulus roots simple.
+
+    margin = 0 accepts the boundary itself (z = 0 is stable for every method); a positive margin
+    demands |R| or every |q| at most 1 - margin, so it only makes sense for a trial z away from 0.
+    """
+    bound = 1.0 - margin
+    if method != "ab3":
+        return bool(abs(amplification_factor(method, z)) <= bound + (_UNIT_ROOT_TOL if margin == 0.0 else 0.0))
+    q = ab3_characteristic_roots(z)
+    if margin > 0.0:
+        return bool(np.all(np.abs(q) <= bound))
+    if np.any(np.abs(q) > 1.0 + _UNIT_ROOT_TOL):
+        return False
+    on_circle = q[np.abs(np.abs(q) - 1.0) <= _UNIT_ROOT_TOL]
+    return all(abs(a - b) > _UNIT_ROOT_TOL for i, a in enumerate(on_circle) for b in on_circle[i + 1:])

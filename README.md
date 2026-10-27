@@ -80,3 +80,47 @@ Choices made while coding that the spec leaves open; cite these in the report wh
   at t_cut uses only coast-side derivatives. A run reaching coast costs n_steps + 14 RHS calls:
   each of the 2 segments has 1 initial f, and 2 RK4 steps that each need 3 calls beyond the
   stored f.
+- **Analytic Jacobian convention** (`analytic_jacobian_choked`, M6). S_cmd = 1 only strictly inside
+  0 < K_p(Pset − Pu) < 1; on either bound the command counts as saturated. The same function
+  covers the fixed orifice by zeroing the whole last row, and it raises on the subcritical branch.
+  It agrees with the production finite-difference Jacobian to ~1e-9 (max scaled difference over
+  max entry) at rel_step 1e-5, 1e-6 and 1e-7, on saturated and unsaturated states.
+- **Benchmark scenarios are test-only `Params`** (`test_physics_benchmarks.py`, M6). They are built
+  with `dataclasses.replace` from the reference params; `REFERENCE_CASE` is untouched. K_F = 0
+  gives no thrust (qp = 0, so Pu stays above Pset and the valve stays closed). Cd = 0 removes drag.
+  R_E = 1e30 gives g = g0 exactly (R_E = inf would give inf/inf = NaN). ρp = inf keeps Vu = Vtank,
+  which is the fixed-Pu scenario. C_reg = 0 gives qr = 0. Observed orders through the full driver
+  on the ballistic and vertical-burn benchmarks: FE 1.00, RK4 4.00, AB3 3.00, BE 1.00.
+- **Stability characterization** (`validation/stability.py`, M6). Eigenvalues are of S⁻¹JS (same
+  spectrum, better balanced). J is the production FD Jacobian at accepted RK4 pilot states,
+  dt = 1.25 ms. A mode is neutral if |λ| ≤ 1e-10 1/s; exact zeros come out below 1e-13, and
+  supply depletion just after the valve opens is ~1e-6. Samples are the Section 9.3 list plus
+  every 0.5 s of burn. A sample whose FD stencil would straddle a command corner moves to the
+  next state. dt_max is the first exit from the stability region along the ray of λ, at |R| = 1
+  with no margin. Apply the interior margin as a factor on dt: |R| → 1 as z → 0, so
+  `is_absolutely_stable(..., margin > 0)` only suits a trial z well away from 0.
+- **Stability findings** (M6). Burn and coast-start samples have two slow positive-real modes,
+  about +0.024 and +0.010 1/s; near apogee only one remains, about +0.0009 1/s. These are
+  trajectory divergence, from the gamma equation and the drag–density coupling, with time
+  scales over 40 s; they are physical, not numerical. The
+  largest stable rate is 384 1/s (τ_v = 5 ms, κ = 100). The lowest damping ratio is 0.068
+  (τ_v = 100 ms, κ = 100). Both match the Section 9.4 reduced-model estimates. Smallest frozen
+  limits over each pilot, in ms:
+
+  | Case | FE | RK4 | AB3 | Set by |
+  |---|---|---|---|---|
+  | nominal | 6.95 | 32.9 | 7.48 | first Pset crossing |
+  | τ_v = 5 ms, κ = 5 | 10.0 | 13.9 | 2.73 | valve mode −1/τ_v at start |
+  | τ_v = 5 ms, κ = 100 | 1.37 | 7.51 | 1.70 | first Pset crossing |
+  | τ_v = 100 ms, κ = 5 | 30.4 | 145 | 32.9 | first Pset crossing |
+  | τ_v = 100 ms, κ = 100 | 1.59 | 34.1 | 8.18 | first Pset crossing |
+  | fixed orifice | 1098 | 1530 | 300 | ullage pressure relaxation at start |
+
+  A dense scan of every other powered state confirmed that the first-crossing sample is the
+  minimum. When the limit comes from the persistent valve mode (τ_v = 5 ms, κ = 5), it brackets
+  the observed failures: runs just inside stay valid, and runs just outside push the valve
+  opening out of [0, 1] (`test_valve_mode_limit_predicts_explicit_failure`). The lightly damped
+  mode after the first Pset crossing lasts only a short time. In a probe, FE and AB3 runs
+  somewhat above that limit stayed valid, but with pressure errors well above the 8 kPa
+  tolerance. Use these limits to screen the M7 halving sequence; they do not replace its
+  accuracy study.

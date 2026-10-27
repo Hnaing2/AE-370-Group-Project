@@ -165,8 +165,61 @@ def jacobian(t: float, u: np.ndarray, params: Any, phase: str, rel_step: float =
 
 
 def analytic_jacobian_choked(t: float, u: np.ndarray, params: Any) -> np.ndarray:
-    """Analytic Jacobian for the regulated, powered, choked branch only; cross-check (Section 9.1)."""
-    raise NotImplementedError
+    """Analytic Jacobian for the powered, choked branch only; cross-check (Section 9.1).
+
+    Regulated: S_cmd = 1 only strictly inside 0 < K_p (Pset - Pu) < 1; on either bound the command
+    counts as saturated (S_cmd = 0), the one-sided convention. Fixed orifice: the whole last row is
+    zero. Raise ValueError on the subcritical branch (r > r_*), which this matrix does not cover.
+    """
+    q = derived_quantities(u, params, "powered")
+    if not q["choked"]:
+        raise ValueError(f"analytic Jacobian covers the choked branch only; r = {q['r']} > r_* = {params.r_star}")
+    V, gamma, ms = float(u[IV]), float(u[IGAMMA]), float(u[IMS])
+    sin_g, cos_g = math.sin(gamma), math.cos(gamma)
+    M, Vu, g, D, Pu = q["M"], q["Vu"], q["g"], q["D"], q["Pu"]
+    RT = params.R_he * params.Tu
+
+    P_p = float(u[IMU]) * RT / (params.rho_p * Vu * Vu)  # dPu/dmp
+    P_m = RT / Vu                                       # dPu/dmu
+    g_h = -2.0 * g / (params.R_E + float(u[IH]))
+    D_V = q["rho"] * V * params.Cd * params.A_ref
+    K_A = params.K_F * math.cos(params.delta)
+    B = params.K_F / (params.Isp * params.g0)
+    A = (q["T_ax"] - D) / M
+    q_s = (params.gamma_he + 1.0) / (2.0 * ms) * q["qr"]
+    q_a = params.C_reg * q["Ps"] / math.sqrt(q["Ts"])
+
+    J = np.zeros((8, 8))
+    J[IX, IV] = cos_g
+    J[IX, IGAMMA] = -V * sin_g
+    J[IH, IV] = sin_g
+    J[IH, IGAMMA] = V * cos_g
+
+    J[IV, IH] = D / (params.H * M) - g_h * sin_g
+    J[IV, IV] = -D_V / M
+    J[IV, IGAMMA] = -g * cos_g
+    J[IV, IMP] = K_A * P_p / M - A / M
+    J[IV, IMS] = -A / M
+    J[IV, IMU] = K_A * P_m / M - A / M
+
+    J[IGAMMA, IH] = -g_h * cos_g / V
+    J[IGAMMA, IV] = g * cos_g / V ** 2
+    J[IGAMMA, IGAMMA] = g * sin_g / V
+
+    J[IMP, IMP] = -B * P_p
+    J[IMP, IMU] = -B * P_m
+
+    J[IMS, IMS] = -q_s
+    J[IMS, IA] = -q_a
+    J[IMU, IMS] = q_s
+    J[IMU, IA] = q_a
+
+    if params.scenario == "regulated":
+        S_cmd = 1.0 if 0.0 < params.K_p * (params.Pset - Pu) < 1.0 else 0.0
+        J[IA, IMP] = -S_cmd * params.K_p * P_p / params.tau_v
+        J[IA, IMU] = -S_cmd * params.K_p * P_m / params.tau_v
+        J[IA, IA] = -1.0 / params.tau_v
+    return J
 
 
 # 1976 US Standard Atmosphere: layers by geopotential altitude (base m, base temperature K, lapse K/m).
