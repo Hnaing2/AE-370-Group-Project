@@ -1,0 +1,302 @@
+{
+  "inputs": {
+    "h0": {
+      "value": 19000.0,
+      "unit": "m",
+      "label": "sourced"
+    },
+    "V0": {
+      "value": 536.0,
+      "unit": "m/s",
+      "label": "sourced"
+    },
+    "gamma0": {
+      "value": 1.1,
+      "unit": "rad",
+      "label": "calibrated"
+    },
+    "x0": {
+      "value": 0.0,
+      "unit": "m",
+      "label": "assumed"
+    },
+    "t_cut": {
+      "value": 7.5,
+      "unit": "s",
+      "label": "sourced"
+    },
+    "m_dry": {
+      "value": 9900.0,
+      "unit": "kg",
+      "label": "assumed"
+    },
+    "mp0": {
+      "value": 2562.0,
+      "unit": "kg",
+      "label": "sourced"
+    },
+    "N_engines": {
+      "value": 8,
+      "unit": "-",
+      "label": "sourced"
+    },
+    "force_engine_ref": {
+      "value": 71000.0,
+      "unit": "N",
+      "label": "sourced"
+    },
+    "Isp": {
+      "value": 235.0,
+      "unit": "s",
+      "label": "nominal (secondary source)"
+    },
+    "delta": {
+      "value": 0.349,
+      "unit": "rad",
+      "label": "assumed"
+    },
+    "Cf": {
+      "value": 1.5,
+      "unit": "-",
+      "label": "assumed"
+    },
+    "P_cal": {
+      "value": 8000000.0,
+      "unit": "Pa",
+      "label": "calibrated"
+    },
+    "rho_o": {
+      "value": 1441.4,
+      "unit": "kg/m^3",
+      "label": "sourced",
+      "reference_temperature": "20 C"
+    },
+    "rho_f": {
+      "value": 879.8,
+      "unit": "kg/m^3",
+      "label": "sourced",
+      "reference_temperature": "20 C"
+    },
+    "mixture_ratio": {
+      "value": 1.65,
+      "unit": "-",
+      "label": "assumed"
+    },
+    "Pset": {
+      "value": 8000000.0,
+      "unit": "Pa",
+      "label": "assumed"
+    },
+    "Ps0": {
+      "value": 35000000.0,
+      "unit": "Pa",
+      "label": "assumed"
+    },
+    "Pu0": {
+      "value": 8280000.0,
+      "unit": "Pa",
+      "label": "assumed"
+    },
+    "Ts0": {
+      "value": 293.15,
+      "unit": "K",
+      "label": "assumed"
+    },
+    "Tu": {
+      "value": 293.15,
+      "unit": "K",
+      "label": "assumed"
+    },
+    "R_he": {
+      "value": 2077.1,
+      "unit": "J/(kg K)",
+      "label": "sourced"
+    },
+    "gamma_he": {
+      "value": 1.667,
+      "unit": "-",
+      "label": "sourced"
+    },
+    "mu0": {
+      "value": 1.64,
+      "unit": "kg",
+      "label": "assumed"
+    },
+    "supply_mode": {
+      "value": "sized",
+      "unit": "-",
+      "label": "study choice"
+    },
+    "Ps_f": {
+      "value": 10000000.0,
+      "unit": "Pa",
+      "label": "sized"
+    },
+    "a_ref": {
+      "value": 0.8,
+      "unit": "-",
+      "label": "sized"
+    },
+    "kappa": {
+      "value": 20.0,
+      "unit": "-",
+      "label": "exploratory range"
+    },
+    "tau_v": {
+      "value": 0.02,
+      "unit": "s",
+      "label": "exploratory range"
+    },
+    "scenario": {
+      "value": "regulated",
+      "unit": "-",
+      "label": "study choice"
+    },
+    "Cd": {
+      "value": 0.6,
+      "unit": "-",
+      "label": "assumed"
+    },
+    "A_ref": {
+      "value": 12.56,
+      "unit": "m^2",
+      "label": "sourced"
+    },
+    "rho0": {
+      "value": 1.225,
+      "unit": "kg/m^3",
+      "label": "assumed"
+    },
+    "H": {
+      "value": 7500.0,
+      "unit": "m",
+      "label": "assumed"
+    },
+    "R_E": {
+      "value": 6371000.0,
+      "unit": "m",
+      "label": "assumed"
+    },
+    "g0": {
+      "value": 9.80665,
+      "unit": "m/s^2",
+      "label": "sourced"
+    },
+    "t_eval": {
+      "value": 15.0,
+      "unit": "s",
+      "label": "study choice"
+    },
+    "t_end": {
+      "value": 200.0,
+      "unit": "s",
+      "label": "study choice"
+    }
+  },
+  "derived": {
+    "rho_p": {
+      "value": 1161.5968013217794,
+      "unit": "kg/m^3"
+    },
+    "Vu0": {
+      "value": 0.12060375103864732,
+      "unit": "m^3"
+    },
+    "Vtank": {
+      "value": 2.3261883369162115,
+      "unit": "m^3"
+    },
+    "K_F": {
+      "value": 0.071,
+      "unit": "N/Pa"
+    },
+    "K_p": {
+      "value": 2.5e-06,
+      "unit": "1/Pa"
+    },
+    "q_p_ref": {
+      "value": 246.46757828572905,
+      "unit": "kg/s"
+    },
+    "ms0": {
+      "value": 39.46728233365429,
+      "unit": "kg"
+    },
+    "Vs": {
+      "value": 0.6866200519841041,
+      "unit": "m^3"
+    },
+    "q_r_req": {
+      "value": 2.7877066633254968,
+      "unit": "kg/s"
+    },
+    "Ts_ref": {
+      "value": 177.5813714400044,
+      "unit": "K"
+    },
+    "r_star": {
+      "value": 0.4870921694407011,
+      "unit": "-"
+    },
+    "C_reg": {
+      "value": 5.900383587955958e-06,
+      "unit": "kg sqrt(K)/(s Pa)"
+    },
+    "a_fix": {
+      "value": 0.2311233010369034,
+      "unit": "-"
+    },
+    "a0": {
+      "value": 0.0,
+      "unit": "-"
+    },
+    "M0": {
+      "value": 12503.107282333654,
+      "unit": "kg"
+    }
+  },
+  "study_baseline_equals_reference_case": true,
+  "exploratory_grids": {
+    "tau_v": {
+      "values": [
+        0.005,
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "unit": "s",
+      "label": "exploratory range"
+    },
+    "kappa": {
+      "values": [
+        5.0,
+        10.0,
+        20.0,
+        50.0,
+        100.0
+      ],
+      "unit": "-",
+      "label": "exploratory range"
+    },
+    "Cd": {
+      "values": [
+        0.4,
+        0.6,
+        0.8
+      ],
+      "unit": "-",
+      "label": "exploratory range"
+    },
+    "gamma0": {
+      "values": [
+        0.93,
+        1.1,
+        1.27
+      ],
+      "unit": "rad",
+      "label": "exploratory range"
+    }
+  },
+  "provenance_sources": "Each input carries a provenance label (sourced, nominal, assumed, calibrated, sized, study choice, exploratory range); the report's parameter table gives the source or justification for each."
+}

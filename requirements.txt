@@ -1,2 +1,6 @@
-numpy
-matplotlib
+# Python >= 3.12. Lower bounds are the oldest versions that reproduced the saved results; the exact versions of
+# each run are recorded in results/data/environment.json.
+numpy>=2.3,<3
+scipy>=1.17,<2
+matplotlib>=3.10,<4
+pytest>=9.1,<10
